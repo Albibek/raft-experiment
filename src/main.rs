@@ -25,10 +25,13 @@ pub mod messages_capnp {
 pub mod state_machine;
 pub mod persistent_log;
 pub(crate) mod common;
-mod messages;
-mod state;
+pub mod messages;
+pub mod state;
 mod error;
-mod consensus;
+//mod consensus;
+mod consensus_lib;
+mod consensus_types;
+mod consensus_shared;
 mod backoff;
 mod smartconn;
 mod server;
@@ -36,6 +39,10 @@ mod server;
 use common::*;
 use error::*;
 use server::*;
+
+use consensus_lib::*;
+use consensus_types::*;
+use consensus_shared::*;
 
 use std::{ops, fmt, net, sync};
 use std::collections::{BTreeMap, HashMap};
@@ -50,7 +57,6 @@ use tokio_service::Service;
 use tokio_timer::Timer;
 use futures::{Future, Stream, Sink, IntoFuture};
 use futures::future::{ok, loop_fn, Loop, err, result};
-use consensus::{ConsensusService, SharedConsensus};
 
 //use capnp::serialize::OwnedSegments;
 use capnp_futures::serialize::OwnedSegments;

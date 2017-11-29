@@ -34,6 +34,9 @@ use futures::sync::mpsc::{UnboundedSender, UnboundedReceiver};
 use tokio_service::Service;
 
 use error::*;
+use consensus_lib::*;
+use consensus_types::*;
+use consensus_shared::*;
 
 use {RaftEgress, RaftIngress};
 
@@ -58,23 +61,31 @@ pub enum ConsensusTimeout {
     Heartbeat(ServerId),
 }
 
-pub struct TimeoutConfiguration {
-    pub election_min_ms: u64,
-    pub election_max_ms: u64,
-    pub heartbeat_ms: u64,
+#[derive(Clone)]
+pub enum PeerStatus {
+    Connecting,
+    Connected(UnboundedSender<RaftEgress>),
 }
 
-impl ConsensusTimeout {
-    /// Returns the timeout period in milliseconds.
-    pub fn duration_ms(&self, config: &TimeoutConfiguration) -> u64 {
-        match *self {
-            ConsensusTimeout::Election => {
-                rand::thread_rng().gen_range::<u64>(config.election_min_ms, config.election_max_ms)
-            }
-            ConsensusTimeout::Heartbeat(..) => config.heartbeat_ms,
+impl PartialEq for PeerStatus {
+    fn eq(&self, other: &PeerStatus) -> bool {
+        match (self, other) {
+            (&PeerStatus::Connecting, &PeerStatus::Connecting) => true,
+            (&PeerStatus::Connected(_), &PeerStatus::Connected(_)) => true,
+            _ => false,
         }
     }
 }
+
+impl fmt::Debug for PeerStatus {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            &PeerStatus::Connecting => write!(fmt, "PeerStatus::Connecting"),
+            &PeerStatus::Connected(_) => write!(fmt, "PeerStatus::Connected"),
+        }
+    }
+}
+
 
 /// A set of actions for the `Server` to carry out asyncronously in response to applying an event
 /// to a `Consensus` state machine.
@@ -129,241 +140,9 @@ impl Actions {
     }
 }
 
-
-#[derive(Clone)]
-pub enum PeerStatus {
-    Connecting,
-    Connected(UnboundedSender<RaftEgress>),
-}
-
-impl PartialEq for PeerStatus {
-    fn eq(&self, other: &PeerStatus) -> bool {
-        match (self, other) {
-            (&PeerStatus::Connecting, &PeerStatus::Connecting) => true,
-            (&PeerStatus::Connected(_), &PeerStatus::Connected(_)) => true,
-            _ => false,
-        }
-    }
-}
-
-impl fmt::Debug for PeerStatus {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            &PeerStatus::Connecting => write!(fmt, "PeerStatus::Connecting"),
-            &PeerStatus::Connected(_) => write!(fmt, "PeerStatus::Connected"),
-        }
-    }
-}
-
-pub enum RequestVoteResponse {
-    StaleTerm(Term),
-    InconsistentLog(Term),
-    Granted(Term),
-    AlreadyVoted(Term),
-}
-
-
-impl From<RequestVoteResponse> for RaftEgress {
-    fn from(r: RequestVoteResponse) -> RaftEgress {
-        match r {
-            RequestVoteResponse::StaleTerm(term) => messages::request_vote_response_stale_term(
-                term,
-            ),
-            RequestVoteResponse::InconsistentLog(term) => {
-                messages::request_vote_response_inconsistent_log(term)
-            }
-            RequestVoteResponse::Granted(term) => messages::request_vote_response_granted(term),
-            RequestVoteResponse::AlreadyVoted(term) => {
-                messages::request_vote_response_already_voted(term)
-            }
-        }
-    }
-}
-
-pub enum ConsensusResponse {
-    StaleTerm(Term),
-    InconsistentPrevEntry(Term, LogIndex),
-    AppendEntriesSuccess(Term, LogIndex),
-}
-
-impl From<ConsensusResponse> for RaftEgress {
-    fn from(r: ConsensusResponse) -> RaftEgress {
-        let message = match r {
-            ConsensusResponse::StaleTerm(term) => {
-                messages::append_entries_response_stale_term(term)
-            }
-            ConsensusResponse::InconsistentPrevEntry(cur, log) => {
-                messages::append_entries_response_inconsistent_prev_entry(cur, log)
-            }
-            ConsensusResponse::AppendEntriesSuccess(cur, latest) => {
-                messages::append_entries_response_success(cur, latest)
-            }
-            _ => unimplemented!(),
-        };
-        RaftEgress(message)
-    }
-}
-
-pub struct SharedConsensus<L, M> {
-    inner: Arc<RwLock<Consensus<L, M>>>,
-}
-
-impl<L, M> SharedConsensus<L, M>
-where
-    L: Log,
-    M: StateMachine,
-{
-    pub fn new(
-        id: ServerId,
-        peers: HashMap<ServerId, SocketAddr>,
-        log: L,
-        state_machine: M,
-    ) -> Self {
-
-        let consensus = Consensus::new(id, peers, log, state_machine);
-        consensus.init();
-
-        Self { inner: Arc::new(RwLock::new(consensus)) }
-
-    }
-
-    pub fn apply_peer_message<S>(&self, from: ServerId, message: &Reader<S>)
-    where
-        S: ReaderSegments,
-    {
-
-        let mut consensus = self.inner.write().unwrap();
-        let reader = message
-            .get_root::<message::Reader>()
-            .unwrap()
-            .which()
-            .unwrap();
-        match reader {
-            message::Which::AppendEntriesRequest(Ok(request)) => {
-                consensus.append_entries_request(from, request)
-            }
-            message::Which::AppendEntriesResponse(Ok(response)) => {
-                consensus.append_entries_response(from, response)
-            }
-            message::Which::RequestVoteRequest(Ok(request)) => {
-                self.request_vote_request(from, request)
-            }
-            message::Which::RequestVoteResponse(Ok(response)) => {
-                self.request_vote_response(from, response)
-            }
-            // FIXME return error correctly
-            _ => unimplemented!(),
-            //_ => panic!("cannot handle message"),
-        };
-    }
-
-    pub fn peer_connection_reset(&self, peer: ServerId, addr: SocketAddr, actions: &mut Actions) {
-        let mut consensus = self.inner.write().unwrap();
-        consensus.peer_connection_reset(peer, addr, actions)
-    }
-
-    pub fn transition(&self, state: ConsensusState) {
-        let mut consensus = self.inner.write().unwrap();
-        consensus.state = state;
-    }
-
-    pub fn get_state(&self) -> ConsensusState {
-        let mut consensus = self.inner.read().unwrap();
-        consensus.state.clone()
-    }
-
-
-    /// returns the result of peer status update operation,
-    /// true returned if this particular server id is inserted/updated to connected state
-    pub fn set_peer_status(&self, id: ServerId, status: Option<PeerStatus>) -> bool {
-        let mut consensus = self.inner.write().unwrap();
-        match status {
-            Some(status) => {
-                use std::collections::hash_map::Entry;
-                match consensus.peer_status.entry(id) {
-                    Entry::Vacant(entry) => {
-                        entry.insert(status);
-                        true
-                    }
-                    Entry::Occupied(mut entry) => {
-                        match entry.get_mut() {
-                            // there was somebody connecting, but it didn't connect yet
-                            e @ &mut PeerStatus::Connecting => {
-                                if let PeerStatus::Connected(_) = status {
-                                    *e = status;
-                                    true
-                                } else {
-                                    false
-                                }
-                            }
-                            // ther is already a connection
-                            //e @ &mut PeerStatus::Connected => false,
-                            // currently the latter case is the only one where we should update
-                            _ => false,
-                        }
-                    }
-                }
-            }
-            None => consensus.peer_status.remove(&id).is_some(),
-        }
-    }
-}
-
-impl<L, M> Clone for SharedConsensus<L, M>
-where
-    L: Log,
-    M: StateMachine,
-{
-    fn clone(&self) -> Self {
-        Self { inner: self.inner.clone() }
-    }
-}
-
-pub struct ConsensusService<L, M>
-where
-    L: Log,
-    M: StateMachine,
-{
-    consensus: SharedConsensus<L, M>,
-    id: ServerId,
-}
-
-impl<L, M> ConsensusService<L, M>
-where
-    L: Log,
-    M: StateMachine,
-{
-    pub fn new(consensus: SharedConsensus<L, M>, id: ServerId) -> Self {
-        Self { consensus, id }
-    }
-}
-
-impl<L, M> Service for ConsensusService<L, M>
-where
-    L: Log,
-    M: StateMachine,
-{
-    type Request = RaftIngress;
-    type Response = Actions;
-    type Error = Error;
-    type Future = Box<Future<Item = Self::Response, Error = Self::Error>>;
-    fn call(&self, req: Self::Request) -> Self::Future {
-        println!("CALL");
-        //let mut actions = Actions::new();
-        use std::borrow::Borrow;
-        let message = self.consensus.apply_peer_message(
-            self.id,
-            req.borrow(),
-            //&mut actions,
-        );
-        //println!("AC: {:?}", actions);
-        //Box::new(::futures::future::ok(message))
-    }
-}
-
 /// An instance of a Raft state machine. The Consensus controls a client state machine, to which it
 /// applies entries in a globally consistent order.
-pub struct Consensus<L, M> {
+pub struct OldConsensus<L, M> {
     /// The ID of this consensus instance.
     id: ServerId,
     /// The IDs of peers in the consensus group.
@@ -389,7 +168,7 @@ pub struct Consensus<L, M> {
     follower_state: FollowerState,
 }
 
-impl<L, M> Consensus<L, M>
+impl<L, M> OldConsensus<L, M>
 where
     L: Log,
     M: StateMachine,
@@ -400,12 +179,12 @@ where
         peers: HashMap<ServerId, SocketAddr>,
         log: L,
         state_machine: M,
-    ) -> Consensus<L, M> {
+    ) -> OldConsensus<L, M> {
         let leader_state = LeaderState::new(
             log.latest_log_index().unwrap(),
             &peers.keys().cloned().collect(),
         );
-        Consensus {
+        Self {
             id: id,
             peers: peers,
             peer_status: HashMap::new(),
@@ -661,6 +440,7 @@ where
                 if leader_term == current_term {
                     // The single leader-per-term invariant is broken; there is a bug in the Raft
                     // implementation.
+                    // TODO make error out of this
                     panic!(
                         "{:?}: peer leader {} with matching term {:?} detected.",
                         self,
@@ -690,8 +470,9 @@ where
         &mut self,
         from: ServerId,
         response: append_entries_response::Reader,
+
         actions: &mut Actions,
-    ) {
+    ) -> Option<ConsensusResponse> {
         let local_term = self.current_term();
         let responder_term = Term::from(response.get_term());
         let local_latest_log_index = self.latest_log_index();
@@ -709,7 +490,7 @@ where
                 responder_term
             );
             self.transition_to_follower(responder_term, from);
-            return;
+            return None;
         } else if local_term > responder_term {
             scoped_debug!(
                 "AppendEntriesResponse from peer {} with a different term: {}",
@@ -718,7 +499,7 @@ where
             );
             // Responder is responding to an AppendEntries request from a different term. Ignore
             // the response.
-            return;
+            return None;
         }
 
         match response.which() {
@@ -826,7 +607,9 @@ where
         &mut self,
         candidate: ServerId,
         request: request_vote_request::Reader,
-    ) -> Result<ConsensusResponse> {
+
+        actions: &mut Actions,
+    ) -> Result<RequestVoteResponse> {
         let candidate_term = Term(request.get_term());
         let candidate_log_term = Term(request.get_last_log_term());
         let candidate_log_index = LogIndex(request.get_last_log_index());
@@ -880,6 +663,7 @@ where
         &mut self,
         from: ServerId,
         response: request_vote_response::Reader,
+
         actions: &mut Actions,
     ) {
         scoped_debug!("RequestVoteResponse from peer {}", from);
@@ -947,7 +731,7 @@ where
             self.leader_state.proposals.push_back((from, log_index));
             if self.peers.is_empty() {
                 scoped_debug!("ProposalRequest from client {}: entry {}", from, log_index);
-                self.advance_commit_index(actions);
+                self.advance_commit_index()
             } else {
                 scoped_debug!(
                     "ProposalRequest from client {}: sending entry {} to peers",
@@ -1085,7 +869,7 @@ where
     }
 
     /// Advances the commit index and applies committed entries to the state machine.
-    fn advance_commit_index(&mut self, actions: &mut Actions) {
+    fn advance_commit_index(&mut self) -> Option<ConsensusResponse> {
         scoped_assert!(self.is_leader());
         let majority = self.majority();
         // TODO: Figure out failure condition here.
@@ -1100,19 +884,22 @@ where
 
         let results = self.apply_commits();
 
+        let mut result = None;
         while let Some(&(client, index)) = self.leader_state.proposals.get(0) {
             if index <= self.commit_index {
                 scoped_trace!("responding to client {} for entry {}", client, index);
                 // We know that there will be an index here since it was commited
                 // and the index is less than that which has been commited.
                 let result = &results[&index];
-                let message = messages::command_response_success(result);
-                actions.client_messages.push((client, message));
+                //let message = messages::command_response_success(result);
+                //actions.client_messages.push((client, message));
                 self.leader_state.proposals.pop_front();
+                result = Some(ConsensusResponse::CommandResponseSuccess)
             } else {
                 break;
             }
         }
+        return result;
     }
 
     /// Applies all committed but unapplied log entries to the state machine.  Returns the set of

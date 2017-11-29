@@ -22,8 +22,6 @@ use tokio_service::Service;
 use tokio_timer::Timer;
 use futures::{Future, Stream, Sink, IntoFuture};
 use futures::future::{ok, loop_fn, Loop, err, result};
-use consensus::{ConsensusService, SharedConsensus};
-use consensus::PeerStatus;
 
 //use capnp::serialize::OwnedSegments;
 use capnp_futures::serialize::OwnedSegments;
@@ -31,6 +29,10 @@ use capnp::message::{DEFAULT_READER_OPTIONS, Reader, ReaderOptions};
 use futures::sync::mpsc::{self, UnboundedSender, UnboundedReceiver, unbounded};
 use capnp_futures::serialize::{read_message, write_message, Transport};
 use smartconn::TimedTransport;
+
+use consensus_lib::*;
+use consensus_types::*;
+use consensus_shared::*;
 
 
 /// Raft server processing connections
