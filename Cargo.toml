@@ -1,0 +1,25 @@
+[package]
+name = "raft-test"
+version = "0.1.0"
+authors = ["Albibek <albibek@gmail.com>"]
+build = "build.rs"
+
+[dependencies]
+capnp="^0.8"
+uuid = {version = "^0.5", features = ["v4"]}
+wrapped_enum = "^0.1"
+capnp-futures = "^0.1"
+tokio-core="^0.1"
+tokio-io="^0.1"
+tokio-service="^0.1"
+tokio-timer="^0.1"
+futures = "^0.1"
+rand="^0.3"
+byteorder="*"
+scoped_log="^0.1"
+log="^0.3"
+bytes="^0.4"
+
+[build-dependencies]
+capnpc = "^0.8"
+
