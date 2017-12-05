@@ -61,30 +61,6 @@ pub enum ConsensusTimeout {
     Heartbeat(ServerId),
 }
 
-#[derive(Clone)]
-pub enum PeerStatus {
-    Connecting,
-    Connected(UnboundedSender<RaftEgress>),
-}
-
-impl PartialEq for PeerStatus {
-    fn eq(&self, other: &PeerStatus) -> bool {
-        match (self, other) {
-            (&PeerStatus::Connecting, &PeerStatus::Connecting) => true,
-            (&PeerStatus::Connected(_), &PeerStatus::Connected(_)) => true,
-            _ => false,
-        }
-    }
-}
-
-impl fmt::Debug for PeerStatus {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            &PeerStatus::Connecting => write!(fmt, "PeerStatus::Connecting"),
-            &PeerStatus::Connected(_) => write!(fmt, "PeerStatus::Connected"),
-        }
-    }
-}
 
 
 /// A set of actions for the `Server` to carry out asyncronously in response to applying an event

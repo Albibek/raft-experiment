@@ -1,4 +1,6 @@
 use {LogIndex, Term, ServerId, ClientId};
+
+use std::collections::HashMap;
 use persistent_log::fs::Entry;
 use rand::{self, Rng};
 
@@ -31,10 +33,26 @@ pub struct AppendEntriesRequest {
 }
 
 pub enum AppendEntriesResponse {
+    Success(Term, LogIndex),
     StaleTerm(Term),
     InconsistentPrevEntry(Term, LogIndex),
     StaleEntry,
+    InternalError(String), // TODO who returns this?
 }
+
+pub type CommitsData = HashMap<LogIndex, Vec<u8>>;
+pub enum CommandResponse {
+    Success(CommitsData),
+
+    // The proposal failed because the Raft node is not the leader, and does
+    // not know who the leader is.
+    UnknownLeader,
+
+    // The client request failed because the Raft node is not the leader.
+    // The value returned may be the address of the current leader.
+    NotLeader(ServerId),
+}
+
 pub enum RequestVoteResponse {
     StaleTerm(Term),
     InconsistentLog(Term),
