@@ -2,7 +2,7 @@ use std::{cmp, fmt};
 use std::collections::HashMap;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Mutex};
 
 use capnp::message::{Builder, HeapAllocator, Reader, ReaderSegments};
 use rand::{self, Rng};
@@ -50,8 +50,6 @@ impl fmt::Debug for PeerStatus {
     }
 }
 
-
-
 impl From<RequestVoteResponse> for RaftEgress {
     fn from(r: RequestVoteResponse) -> RaftEgress {
         RaftEgress(match r {
@@ -69,26 +67,33 @@ impl From<RequestVoteResponse> for RaftEgress {
     }
 }
 
-//impl From<ConsensusResponse> for RaftEgress {
-//fn from(r: ConsensusResponse) -> RaftEgress {
-//let message = match r {
-//ConsensusResponse::StaleTerm(term) => {
-//messages::append_entries_response_stale_term(term)
-//}
-//ConsensusResponse::InconsistentPrevEntry(cur, log) => {
-//messages::append_entries_response_inconsistent_prev_entry(cur, log)
-//}
-//ConsensusResponse::AppendEntriesSuccess(cur, latest) => {
-//messages::append_entries_response_success(cur, latest)
-//}
-//_ => unimplemented!(),
-//};
-//RaftEgress(message)
-//}
-//}
+impl<'a> From<append_entries_request::Reader<'a>> for AppendEntriesRequest {
+    fn from(r: append_entries_request::Reader<'a>) -> Self {
+        unimplemented!()
+    }
+}
+
+impl<'a> From<append_entries_response::Reader<'a>> for AppendEntriesResponse {
+    fn from(r: append_entries_response::Reader<'a>) -> Self {
+        unimplemented!()
+    }
+}
+
+impl<'a> From<request_vote_request::Reader<'a>> for RequestVoteRequest {
+    fn from(r: request_vote_request::Reader<'a>) -> Self {
+        unimplemented!()
+    }
+}
+
+impl<'a> From<request_vote_response::Reader<'a>> for RequestVoteResponse {
+    fn from(r: request_vote_response::Reader<'a>) -> Self {
+        unimplemented!()
+    }
+}
 
 pub struct SharedConsensus<L, M> {
     inner: Arc<RwLock<Consensus<L, M>>>,
+    peer_status: Arc<Mutex<HashMap<ServerId, PeerStatus>>>,
 }
 
 impl<L, M> SharedConsensus<L, M>
@@ -96,17 +101,15 @@ where
     L: Log,
     M: StateMachine,
 {
-    pub fn new(
-        id: ServerId,
-        peers: HashMap<ServerId, SocketAddr>,
-        log: L,
-        state_machine: M,
-    ) -> Self {
+    pub fn new(id: ServerId, peers: Vec<ServerId>, log: L, state_machine: M) -> Self {
 
         let consensus = Consensus::new(id, peers, log, state_machine);
         consensus.init();
 
-        Self { inner: Arc::new(RwLock::new(consensus)) }
+        Self {
+            inner: Arc::new(RwLock::new(consensus)),
+            peer_status: Arc::new(Mutex::new(HashMap::new())),
+        }
 
     }
 
@@ -124,16 +127,16 @@ where
         match reader {
             message::Which::AppendEntriesRequest(Ok(request)) => {
                 //FIXME process return values from these
-                consensus.append_entries_request(from, request);
+                consensus.append_entries_request(from, request.into());
             }
             message::Which::AppendEntriesResponse(Ok(response)) => {
-                consensus.append_entries_response(from, response);
+                consensus.append_entries_response(from, response.into());
             }
             message::Which::RequestVoteRequest(Ok(request)) => {
-                consensus.request_vote_request(from, request);
+                consensus.request_vote_request(from, request.into());
             }
             message::Which::RequestVoteResponse(Ok(response)) => {
-                consensus.request_vote_response(from, response);
+                consensus.request_vote_response(from, response.into());
             }
             // FIXME return error correctly
             _ => unimplemented!(),
@@ -146,25 +149,19 @@ where
     //consensus.peer_connection_reset(peer, addr, actions)
     //}
 
-    pub fn transition(&self, state: ConsensusState) {
-        let mut consensus = self.inner.write().unwrap();
-        consensus.state = state;
-    }
-
     pub fn get_state(&self) -> ConsensusState {
         let mut consensus = self.inner.read().unwrap();
-        consensus.state.clone()
+        consensus.get_state()
     }
-
 
     /// returns the result of peer status update operation,
     /// true returned if this particular server id is inserted/updated to connected state
     pub fn set_peer_status(&self, id: ServerId, status: Option<PeerStatus>) -> bool {
-        let mut consensus = self.inner.write().unwrap();
+        let mut peers = self.peer_status.lock().unwrap();
         match status {
             Some(status) => {
                 use std::collections::hash_map::Entry;
-                match consensus.peer_status.entry(id) {
+                match peers.entry(id) {
                     Entry::Vacant(entry) => {
                         entry.insert(status);
                         true
@@ -180,7 +177,7 @@ where
                                     false
                                 }
                             }
-                            // ther is already a connection
+                            // there is already a connection
                             //e @ &mut PeerStatus::Connected => false,
                             // currently the latter case is the only one where we should update
                             _ => false,
@@ -188,7 +185,7 @@ where
                     }
                 }
             }
-            None => consensus.peer_status.remove(&id).is_some(),
+            None => peers.remove(&id).is_some(),
         }
     }
 }
@@ -199,7 +196,10 @@ where
     M: StateMachine,
 {
     fn clone(&self) -> Self {
-        Self { inner: self.inner.clone() }
+        Self {
+            inner: self.inner.clone(),
+            peer_status: self.peer_status.clone(),
+        }
     }
 }
 
@@ -241,6 +241,6 @@ where
             //&mut actions,
         );
         //println!("AC: {:?}", actions);
-        Box::new(::futures::future::ok(message).then(|_| Ok(())))
+        Box::new(::futures::future::ok(message).then(|_: Result<()>| Ok(())))
     }
 }

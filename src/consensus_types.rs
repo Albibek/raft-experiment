@@ -3,18 +3,18 @@ use {LogIndex, Term, ServerId, ClientId};
 use std::collections::HashMap;
 use persistent_log::fs::Entry;
 use rand::{self, Rng};
+use state::ConsensusState;
 
-//================= Requests and responses
+//================= Peer messages
 
 pub enum PeerMessage {
     AppendEntriesRequest(AppendEntriesRequest),
     AppendEntriesResponse(AppendEntriesResponse),
-    RequestVoteRequest,
-    RequestVoteResponse,
-    /// Must not be sent
-    Ignore(IgnoreReason),
+    RequestVoteRequest(RequestVoteRequest),
+    RequestVoteResponse(RequestVoteResponse),
 }
 
+#[derive(Clone)]
 pub struct AppendEntriesRequest {
     /// The leader's term.
     pub term: Term,
@@ -25,11 +25,12 @@ pub struct AppendEntriesRequest {
     /// Term of prevLogIndex entry
     pub prev_log_term: Term,
 
-    /// Log entries to store (empty for heartbeat; may send more than one for efficiency)
-    pub entries: Vec<Entry>,
-
     /// The Leader’s commit log index.
     pub leader_commit: LogIndex,
+
+    /// Log entries to store (empty for heartbeat; may send more than one for efficiency)
+    pub entries: Vec<Entry>,
+    // TODO: custom Clone or Cow to avoid cloning vector
 }
 
 pub enum AppendEntriesResponse {
@@ -40,9 +41,63 @@ pub enum AppendEntriesResponse {
     InternalError(String), // TODO who returns this?
 }
 
-pub type CommitsData = HashMap<LogIndex, Vec<u8>>;
+#[derive(Clone)]
+pub struct RequestVoteRequest {
+    /// The candidate's term.
+    pub term: Term,
+
+    /// The index of the candidate's last log entry.
+    pub last_log_index: LogIndex,
+
+    /// The term of the candidate's last log entry.
+    pub last_log_term: Term,
+}
+
+pub enum RequestVoteResponse {
+    StaleTerm(Term),
+    InconsistentLog(Term),
+    Granted(Term),
+    AlreadyVoted(Term),
+}
+
+impl RequestVoteResponse {
+    pub fn voter_term(&self) -> Term {
+        match self {
+            &RequestVoteResponse::StaleTerm(t) |
+            &RequestVoteResponse::InconsistentLog(t) |
+            &RequestVoteResponse::Granted(t) |
+            &RequestVoteResponse::AlreadyVoted(t) => t,
+        }
+    }
+}
+
+//================= Client messages
+pub enum ClientRequest {
+    Ping,
+    Proposal(Vec<u8>),
+    Query(Vec<u8>),
+}
+
+
+pub enum ClientResponse {
+    Ping(PingResponse),
+    Proposal(CommandResponse),
+    Query(CommandResponse),
+}
+
+pub struct PingResponse {
+    /// The server's current term
+    pub(crate) term: Term,
+
+    /// The server's current index
+    pub(crate) index: LogIndex,
+
+    /// The server's current state
+    pub(crate) state: ConsensusState,
+}
+
 pub enum CommandResponse {
-    Success(CommitsData),
+    Success(Vec<u8>),
 
     // The proposal failed because the Raft node is not the leader, and does
     // not know who the leader is.
@@ -53,26 +108,7 @@ pub enum CommandResponse {
     NotLeader(ServerId),
 }
 
-pub enum RequestVoteResponse {
-    StaleTerm(Term),
-    InconsistentLog(Term),
-    Granted(Term),
-    AlreadyVoted(Term),
-}
-
-pub enum IgnoreReason {
-}
-
-pub enum ConsensusResponse {
-    AppendEntriesSuccess(Term, LogIndex),
-
-    // returned from advance_commit_index
-    CommandResponseSuccess,
-}
-
-pub enum ConsensusError {
-    //
-}
+//================= other messages
 
 /// Consensus timeout types.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]

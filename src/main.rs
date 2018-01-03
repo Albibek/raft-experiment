@@ -89,7 +89,8 @@ fn main() {
     let srvid = 10.into();
     let addr = "127.0.0.1:5000".parse().unwrap();
     let h = ::std::thread::spawn(move || {
-        let base_consensus = SharedConsensus::new(srvid, cons_peers.clone(), store, machine);
+        let base_consensus =
+            SharedConsensus::new(srvid, cons_peers.keys().cloned().collect(), store, machine);
         let mut core = Core::new().unwrap();
         let base_handle = core.handle();
 

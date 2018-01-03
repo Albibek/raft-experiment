@@ -17,9 +17,10 @@ use persistent_log::Log;
 pub struct Consensus<L, M> {
     /// The ID of this consensus instance.
     id: ServerId,
+
     /// The IDs of peers in the consensus group.
-    peers: HashMap<ServerId, SocketAddr>,
-    peer_status: HashMap<ServerId, PeerStatus>,
+    peers: Vec<ServerId>,
+
     /// The persistent log.
     log: L,
     /// The client state machine to which client commands are applied.
@@ -27,15 +28,19 @@ pub struct Consensus<L, M> {
 
     /// Index of the latest entry known to be committed.
     commit_index: LogIndex,
+
     /// Index of the latest entry applied to the state machine.
     last_applied: LogIndex,
 
     /// The current state of the `Consensus` (`Leader`, `Candidate`, or `Follower`).
     state: ConsensusState,
+
     /// State necessary while a `Leader`. Should not be used otherwise.
     leader_state: LeaderState,
+
     /// State necessary while a `Candidate`. Should not be used otherwise.
     candidate_state: CandidateState,
+
     /// State necessary while a `Follower`. Should not be used otherwise.
     follower_state: FollowerState,
 }
@@ -50,20 +55,14 @@ where
     M: StateMachine,
 {
     /// Creates a `Consensus`.
-    pub fn new(
-        id: ServerId,
-        peers: HashMap<ServerId, SocketAddr>,
-        log: L,
-        state_machine: M,
-    ) -> Self {
+    pub fn new(id: ServerId, peers: Vec<ServerId>, log: L, state_machine: M) -> Self {
         let leader_state = LeaderState::new(
             log.latest_log_index().unwrap(),
-            &peers.keys().cloned().collect(),
+            &peers.iter().cloned().collect(),
         );
         Self {
             id: id,
             peers: peers,
-            peer_status: HashMap::new(),
             log: log,
             state_machine: state_machine,
             commit_index: LogIndex(0),
@@ -73,11 +72,6 @@ where
             candidate_state: CandidateState::new(),
             follower_state: FollowerState::new(),
         }
-    }
-
-    /// Returns the consenus peers.
-    pub fn peers(&self) -> &HashMap<ServerId, SocketAddr> {
-        &self.peers
     }
 
     /// Returns the set of initial action which should be executed upon startup.
@@ -90,24 +84,28 @@ where
         &mut self,
         from: ServerId,
         message: PeerMessage,
-    ) -> Result<(PeerMessage, Option<ConsensusTimeout>), ()> {
+    ) -> (Option<PeerMessage>, Option<ConsensusTimeout>) {
         // process error
         match message {
             PeerMessage::AppendEntriesRequest(request) => {
                 //FIXME process return values from these
                 let (response, timeout) = self.append_entries_request(from, request);
-                Ok((PeerMessage::AppendEntriesResponse(response), timeout))
+                (Some(PeerMessage::AppendEntriesResponse(response)), timeout)
             }
-            //message::Which::AppendEntriesResponse(Ok(response)) => {
-            //consensus.append_entries_response(from, response);
-            //}
-            //message::Which::RequestVoteRequest(Ok(request)) => {
-            //consensus.request_vote_request(from, request);
-            //}
-            //message::Which::RequestVoteResponse(Ok(response)) => {
-            //consensus.request_vote_response(from, response);
-            //}
-            _ => unimplemented!(),
+
+            PeerMessage::AppendEntriesResponse(response) => {
+                let (request, timeout) = self.append_entries_response(from, response);
+                (request.map(PeerMessage::AppendEntriesRequest), timeout)
+            }
+            PeerMessage::RequestVoteRequest(request) => {
+                let response = self.request_vote_request(from, request);
+                (response.map(PeerMessage::RequestVoteResponse), None)
+            }
+
+            PeerMessage::RequestVoteResponse(response) => {
+                self.request_vote_response(from, response);
+                (None, None)
+            }
         }
     }
 
@@ -172,7 +170,7 @@ where
                                 // TODO: remove this?
                                 let entries_vec: Vec<(Term, &[u8])> = entries
                                     .iter()
-                                    .map(|&(term, data)| (term, data.as_slice()))
+                                    .map(|&(term, ref data)| (term, data.as_slice()))
                                     .collect();
 
                                 self.log
@@ -232,7 +230,7 @@ where
     ///
     /// The provided message may be initialized with a new AppendEntries request to send back to
     /// the follower in the case that the follower's log is behind.
-    fn append_entries_response(
+    pub(crate) fn append_entries_response(
         &mut self,
         from: ServerId,
         response: AppendEntriesResponse,
@@ -291,6 +289,9 @@ where
                     LogIndex::from(next_index),
                 );
             }
+            AppendEntriesResponse::StaleEntry => {
+                return (None, None);
+            }
             AppendEntriesResponse::StaleTerm(_) => {
                 // The peer is reporting a stale term, but the term number matches the local term.
                 // Ignore the response, since it is to a message from a prior term, and this server
@@ -330,13 +331,16 @@ where
 
             let entries = self.log
                 .entries(LogIndex::from(from_index), LogIndex::from(until_index))
-                .unwrap();
+                .unwrap()
+                .into_iter()
+                .map(|(t, slice)| (t, slice.to_vec()))
+                .collect();
 
             let message = AppendEntriesRequest {
                 term: local_term,
                 prev_log_index,
                 prev_log_term,
-                entries: &entries,
+                entries: entries,
                 leader_commit: self.commit_index,
             };
 
@@ -365,16 +369,13 @@ where
             }
         }
 
+        // this only happens when called from proposal_request
         let results = self.apply_commits();
-
-        // TODO: this only happens when proposal_request was called
-        return None;
-
         // in general we should reply to all clients' proposals with success
-        /*
         while let Some(&(client, index)) = self.leader_state.proposals.get(0) {
             if index <= self.commit_index {
                 //scoped_trace!("responding to client {} for entry {}", client, index);
+
                 // We know that there will be an index here since it was commited
                 // and the index is less than that which has been commited.
                 let result = &results[&index];
@@ -384,10 +385,282 @@ where
             // Some(CommandResponse::Success)
             } else {
                 break;
+            }
+        }
+
+        return None;
+    }
+
+    /// Applies a peer request vote request to the consensus state machine.
+    pub(crate) fn request_vote_request(
+        &mut self,
+        candidate: ServerId,
+        request: RequestVoteRequest,
+    ) -> Option<RequestVoteResponse> {
+        // TODO return Option is needless?
+        // TODO remove
+        let candidate_term = request.term;
+        let candidate_log_term = request.last_log_term;
+        let candidate_log_index = request.last_log_index;
+        scoped_debug!(
+            "RequestVoteRequest from Consensus {{ id: {}, term: {}, latest_log_term: \
+                       {}, latest_log_index: {} }}",
+            &candidate,
+            candidate_term,
+            candidate_log_term,
+            candidate_log_index
+        );
+        let local_term = self.current_term();
+
+        let new_local_term = if candidate_term > local_term {
+            scoped_info!(
+                "received RequestVoteRequest from Consensus {{ id: {}, term: {} }} \
+                         with newer term; transitioning to Follower",
+                candidate,
+                candidate_term
+            );
+            self.transition_to_follower(candidate_term, candidate);
+            candidate_term
+        } else {
+            local_term
+        };
+
+        let message = if candidate_term < local_term {
+            Some(RequestVoteResponse::StaleTerm(new_local_term))
+        } else if candidate_log_term < self.latest_log_term() ||
+                   candidate_log_index < self.latest_log_index()
+        {
+            Some(RequestVoteResponse::InconsistentLog(new_local_term))
+        } else {
+            match self.log.voted_for().unwrap() { // TODO deal with unwrap
+                None => {
+                    self.log.set_voted_for(candidate).unwrap(); // TODO deal with unwrap
+                    Some(RequestVoteResponse::Granted(new_local_term))
+                }
+                Some(voted_for) if voted_for == candidate => {
+                    Some(RequestVoteResponse::Granted(new_local_term))
+                }
+                // FIXME: deal with the "_" wildcard
+                _ => Some(RequestVoteResponse::AlreadyVoted(new_local_term)),
+            }
+        };
+        message
+    }
+
+    /// Applies a request vote response to the consensus state machine.
+    pub(crate) fn request_vote_response(
+        &mut self,
+        from: ServerId,
+        response: RequestVoteResponse,
+    ) -> HashMap<ServerId, PeerMessage> {
+        scoped_debug!("RequestVoteResponse from peer {}", from);
+
+        let local_term = self.current_term();
+        // TODO remove
+        let voter_term = response.voter_term();
+
+        let majority = self.majority();
+        if local_term < voter_term {
+            // Responder has a higher term number. The election is compromised; abandon it and
+            // revert to follower state with the updated term number. Any further responses we
+            // receive from this election term will be ignored because the term will be outdated.
+
+            // The responder is not necessarily the leader, but it is somewhat likely, so we will
+            // use it as the leader hint.
+            scoped_info!(
+                "received RequestVoteResponse from Consensus {{ id: {}, term: {} }} \
+                         with newer term; transitioning to Follower",
+                from,
+                voter_term
+            );
+            self.transition_to_follower(voter_term, from);
+            HashMap::new()
+        } else if local_term > voter_term {
+            // Ignore this message; it came from a previous election cycle.
+            HashMap::new()
+        } else if self.is_candidate() {
+            // A vote was received!
+            if let RequestVoteResponse::Granted(_) = response {
+                self.candidate_state.record_vote(from);
+                if self.candidate_state.count_votes() >= majority {
+                    scoped_info!(
+                        "election for term {} won; transitioning to Leader",
+                        local_term
+                    );
+                    self.transition_to_leader()
+                } else {
+                    HashMap::new()
+                }
+            } else {
+                HashMap::new()
+            }
+        } else {
+            unreachable!()
+        }
+    }
+}
+
+//==================== Client messages processing
+impl<L, M> Consensus<L, M>
+where
+    L: Log,
+    M: StateMachine,
+{
+    /// Applies a client message to the consensus state machine.
+    pub fn apply_client_message(
+        &mut self,
+        from: ClientId,
+        message: ClientRequest,
+    ) -> (Option<ClientResponse>, HashMap<ServerId, PeerMessage>) {
+        //push_log_scope!("{:?}", self);
+        match message {
+            ClientRequest::Ping => (
+                Some(ClientResponse::Ping(self.ping_request())),
+                HashMap::new(),
+            ),
+            ClientRequest::Proposal(data) => {
+                let (response, peer_msg) = self.proposal_request(from, data);
+                (response.map(ClientResponse::Proposal), peer_msg)
+            }
+            ClientRequest::Query(data) => (
+                Some(
+                    ClientResponse::Query(self.query_request(from, data)),
+                ),
+                HashMap::new(),
+            ),
+        }
+    }
+
+    fn ping_request(&self) -> PingResponse {
+        PingResponse {
+            term: self.current_term(),
+            index: self.latest_log_index(),
+            state: self.state.clone(),
+        }
+    }
+
+    /// Applies a client proposal to the consensus state machine.
+    /// In addition to the client response this function requires peer messages to be sent
+    fn proposal_request(
+        &mut self,
+        from: ClientId,
+        request: Vec<u8>,
+    ) -> (Option<CommandResponse>, HashMap<ServerId, PeerMessage>) {
+        let leader = self.follower_state.leader;
+        let mut peer_messages = HashMap::new();
+        match self.state {
+            ConsensusState::Candidate => (Some(CommandResponse::UnknownLeader), peer_messages),
+            ConsensusState::Follower if leader.is_none() => (
+                Some(CommandResponse::UnknownLeader),
+                peer_messages,
+            ),
+            ConsensusState::Follower => {
+                //&self.peers[&self.follower_state.leader.unwrap()],
+                (
+                    Some(CommandResponse::NotLeader(
+                        self.follower_state.leader.unwrap().clone(),
+                    )),
+                    peer_messages,
+                )
+            }
+            ConsensusState::Leader => {
+                let prev_log_index = self.latest_log_index();
+                let prev_log_term = self.latest_log_term();
+                let term = self.current_term();
+                let log_index = prev_log_index + 1;
+                let leader_commit = self.commit_index;
+                self.log
+                    .append_entries(log_index, &[(term, &request)])
+                    .unwrap();
+                self.leader_state.proposals.push_back((from, log_index));
+                if self.peers.is_empty() {
+                    scoped_debug!("ProposalRequest from client {}: entry {}", from, log_index);
+                    (self.advance_commit_index(), peer_messages)
+                } else {
+                    let message = AppendEntriesRequest {
+                        term,
+                        prev_log_index,
+                        prev_log_term,
+                        leader_commit,
+                        entries: vec![(term, request)],
+                    };
+                    for &peer in self.peers.iter() {
+                        if self.leader_state.next_index(&peer) == log_index {
+                            let mut entry =
+                                peer_messages.insert(
+                                    peer,
+                                    PeerMessage::AppendEntriesRequest(message.clone()),
+                                );
+                            self.leader_state.set_next_index(peer, log_index + 1);
+                        }
+                    }
+                    (self.advance_commit_index(), peer_messages)
+                }
 
             }
         }
-        */
+    }
+
+    /// Applies a client query to the state machine.
+    fn query_request(&mut self, from: ClientId, request: Vec<u8>) -> CommandResponse {
+        scoped_trace!("query from Client({})", from);
+        let leader = self.follower_state.leader;
+        match self.state {
+            ConsensusState::Candidate => CommandResponse::UnknownLeader,
+            ConsensusState::Follower if leader.is_none() => CommandResponse::UnknownLeader,
+            ConsensusState::Follower => {
+                //&self.peers[&self.follower_state.leader.unwrap()],
+                CommandResponse::NotLeader(self.follower_state.leader.unwrap().clone())
+            }
+            ConsensusState::Leader => {
+                // TODO(from original raft): This is probably not exactly safe.
+                let result = self.state_machine.query(&request);
+                CommandResponse::Success(result)
+            }
+        }
+    }
+}
+
+//==================== Timeouts
+impl<L, M> Consensus<L, M>
+where
+    L: Log,
+    M: StateMachine,
+{
+    /// Triggers a heartbeat timeout for the peer.
+    pub fn heartbeat_timeout(&mut self, peer: ServerId) -> AppendEntriesRequest {
+        // FIXME do we really need to hold the queue for disconnected peer
+        // (the one that has heartbeat timeout triggered)?
+        // how is that different from ping?
+        scoped_assert!(self.is_leader());
+        scoped_debug!("HeartbeatTimeout for peer: {}", peer);
+        AppendEntriesRequest {
+            term: self.current_term(),
+            prev_log_index: self.latest_log_index(),
+            prev_log_term: self.log.latest_log_term().unwrap(), // TODO: error
+            leader_commit: self.commit_index,
+            entries: Vec::new(),
+        }
+    }
+
+    /// Triggers an election timeout.
+    pub fn election_timeout(&mut self) -> HashMap<ServerId, PeerMessage> {
+        scoped_assert!(!self.is_leader());
+        if self.peers.is_empty() {
+            // Solitary replica special case; jump straight to Leader state.
+            scoped_info!("ElectionTimeout: transitioning to Leader");
+            scoped_assert!(self.is_follower());
+            scoped_assert!(self.log.voted_for().unwrap().is_none());
+            self.log.inc_current_term().unwrap();
+            self.log.set_voted_for(self.id).unwrap();
+            let latest_log_index = self.latest_log_index();
+            self.state = ConsensusState::Leader;
+            self.leader_state.reinitialize(latest_log_index);
+            HashMap::new()
+        } else {
+            scoped_info!("ElectionTimeout: transitioning to Candidate");
+            self.transition_to_candidate()
+        }
     }
 }
 
@@ -405,6 +678,59 @@ where
         self.state = ConsensusState::Follower;
         self.follower_state.set_leader(leader);
         //     actions.clear_peer_messages = true;
+    }
+
+    /// Transitions this consensus state machine to Leader state.
+    fn transition_to_leader(&mut self) -> HashMap<ServerId, PeerMessage> {
+        scoped_trace!("transitioning to Leader");
+        let latest_log_index = self.log.latest_log_index().unwrap();
+        self.state = ConsensusState::Leader;
+        self.leader_state.reinitialize(latest_log_index);
+
+        let message = AppendEntriesRequest {
+            term: self.current_term(),
+            prev_log_index: latest_log_index,
+            prev_log_term: self.log.latest_log_term().unwrap(),
+            leader_commit: self.commit_index,
+            entries: Vec::new(),
+        };
+
+        let mut peer_messages = HashMap::new();
+        for &peer in self.peers.iter() {
+            let mut entry =
+                peer_messages.insert(peer, PeerMessage::AppendEntriesRequest(message.clone()));
+        }
+        peer_messages
+
+        // TODO: deal with timeouts
+        //actions.clear_timeouts = true;
+        //actions.clear_peer_messages = true;
+    }
+
+    /// Transitions the consensus state machine to Candidate state.
+    fn transition_to_candidate(&mut self) -> HashMap<ServerId, PeerMessage> {
+        scoped_trace!("transitioning to Candidate");
+        self.log.inc_current_term().unwrap();
+        self.log.set_voted_for(self.id).unwrap();
+        self.state = ConsensusState::Candidate;
+        self.candidate_state.clear();
+        self.candidate_state.record_vote(self.id);
+
+        let message = RequestVoteRequest {
+            term: self.current_term(),
+            last_log_index: self.latest_log_index(),
+            last_log_term: self.log.latest_log_term().unwrap(),
+        };
+
+        let mut peer_messages = HashMap::new();
+        for &peer in self.peers.iter() {
+            let mut entry =
+                peer_messages.insert(peer, PeerMessage::RequestVoteRequest(message.clone()));
+        }
+        peer_messages
+        // TODO timeouts
+        //actions.timeouts.push(ConsensusTimeout::Election);
+        // actions.clear_peer_messages = true;
     }
 }
 //==================== Utility functions
@@ -442,6 +768,11 @@ where
     /// Returns whether the consensus state machine is currently a Candidate.
     fn is_candidate(&self) -> bool {
         self.state == ConsensusState::Candidate
+    }
+
+    /// Returns current state of consensus state machine
+    pub fn get_state(&self) -> ConsensusState {
+        self.state.clone()
     }
 
     /// Returns the current term.
