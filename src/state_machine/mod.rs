@@ -9,8 +9,8 @@
 //! commands would be seen by all consensus modules.
 use std::fmt::Debug;
 
-mod channel;
-mod null;
+pub mod channel;
+pub mod null;
 
 pub use state_machine::channel::ChannelStateMachine;
 pub use state_machine::null::NullStateMachine;

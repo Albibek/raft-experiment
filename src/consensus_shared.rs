@@ -2,21 +2,20 @@ use std::{cmp, fmt};
 use std::collections::HashMap;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use capnp::message::{Builder, HeapAllocator, Reader, ReaderSegments};
 use rand::{self, Rng};
 
-use {LogIndex, Term, ServerId, ClientId, messages};
-use messages_capnp::{append_entries_request, append_entries_response, client_request,
-                     proposal_request, query_request, message, request_vote_request,
-                     request_vote_response};
-use state::{ConsensusState, LeaderState, CandidateState, FollowerState};
+use {messages, ClientId, LogIndex, ServerId, Term};
+use messages_capnp::{append_entries_request, append_entries_response, client_request, message,
+                     proposal_request, query_request, request_vote_request, request_vote_response};
+use state::{CandidateState, ConsensusState, FollowerState, LeaderState};
 use state_machine::StateMachine;
 use persistent_log::Log;
 
-use futures::{Future, Stream, Sink, IntoFuture};
-use futures::sync::mpsc::{UnboundedSender, UnboundedReceiver};
+use futures::{Future, IntoFuture, Sink, Stream};
+use futures::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_service::Service;
 
 use error::*;
@@ -24,6 +23,56 @@ use consensus_lib::*;
 use consensus_types::*;
 
 use {RaftEgress, RaftIngress};
+
+/// A handler that just collects all messages leaving someone external to process them
+#[derive(Debug)]
+pub struct CollectHandler {
+    pub peer_messages: HashMap<ServerId, Vec<PeerMessage>>,
+    pub client_messages: HashMap<ClientId, Vec<ClientResponse>>,
+    pub timeouts: Vec<ConsensusTimeout>,
+    pub clear_timeouts: bool,
+}
+
+impl CollectHandler {
+    pub fn new() -> Self {
+        Self {
+            peer_messages: HashMap::new(),
+            client_messages: HashMap::new(),
+            timeouts: Vec::new(),
+            clear_timeouts: false,
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.peer_messages.clear();
+        self.client_messages.clear();
+        self.timeouts.clear();
+        self.clear_timeouts = false;
+    }
+}
+
+impl ConsensusHandler for CollectHandler {
+    fn send_peer_message(&mut self, id: ServerId, message: PeerMessage) {
+        let peer = self.peer_messages.entry(id).or_insert(Vec::new());
+        peer.push(message);
+    }
+
+    fn send_client_response(&mut self, id: ClientId, message: ClientResponse) {
+        let client = self.client_messages.entry(id).or_insert(Vec::new());
+        client.push(message);
+    }
+
+    fn set_timeout(&mut self, timeout: ConsensusTimeout) {
+        self.timeouts.push(timeout);
+    }
+
+    fn clear_timeout(&mut self, _timeout: ConsensusTimeout) {
+        // TODO: there is probably a bit of a logic flaw here(we clear all timeouts when we should
+        // clear only one)
+        // but it's ok since original consensus worked this way
+        self.clear_timeouts = true
+    }
+}
 
 #[derive(Clone)]
 pub enum PeerStatus {
@@ -53,9 +102,9 @@ impl fmt::Debug for PeerStatus {
 impl From<RequestVoteResponse> for RaftEgress {
     fn from(r: RequestVoteResponse) -> RaftEgress {
         RaftEgress(match r {
-            RequestVoteResponse::StaleTerm(term) => messages::request_vote_response_stale_term(
-                term,
-            ),
+            RequestVoteResponse::StaleTerm(term) => {
+                messages::request_vote_response_stale_term(term)
+            }
             RequestVoteResponse::InconsistentLog(term) => {
                 messages::request_vote_response_inconsistent_log(term)
             }
@@ -92,7 +141,8 @@ impl<'a> From<request_vote_response::Reader<'a>> for RequestVoteResponse {
 }
 
 pub struct SharedConsensus<L, M> {
-    inner: Arc<RwLock<Consensus<L, M>>>,
+    // TODO: generic handler
+    inner: Arc<RwLock<Consensus<L, M, CollectHandler>>>,
     peer_status: Arc<Mutex<HashMap<ServerId, PeerStatus>>>,
 }
 
@@ -102,22 +152,20 @@ where
     M: StateMachine,
 {
     pub fn new(id: ServerId, peers: Vec<ServerId>, log: L, state_machine: M) -> Self {
-
-        let consensus = Consensus::new(id, peers, log, state_machine);
+        let handler = CollectHandler::new();
+        let consensus = Consensus::new(id, peers, log, state_machine, handler);
         consensus.init();
 
         Self {
             inner: Arc::new(RwLock::new(consensus)),
             peer_status: Arc::new(Mutex::new(HashMap::new())),
         }
-
     }
 
     pub fn apply_peer_message<S>(&self, from: ServerId, message: &Reader<S>)
     where
         S: ReaderSegments,
     {
-
         let mut consensus = self.inner.write().unwrap();
         let reader = message
             .get_root::<message::Reader>()
@@ -126,7 +174,6 @@ where
             .unwrap();
         match reader {
             message::Which::AppendEntriesRequest(Ok(request)) => {
-                //FIXME process return values from these
                 consensus.append_entries_request(from, request.into());
             }
             message::Which::AppendEntriesResponse(Ok(response)) => {
@@ -150,7 +197,7 @@ where
     //}
 
     pub fn get_state(&self) -> ConsensusState {
-        let mut consensus = self.inner.read().unwrap();
+        let consensus = self.inner.read().unwrap();
         consensus.get_state()
     }
 

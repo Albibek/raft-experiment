@@ -56,15 +56,15 @@ use tokio_core::net::TcpStream;
 use tokio_service::Service;
 use tokio_timer::Timer;
 use futures::{Future, Stream, Sink, IntoFuture};
-use futures::future::{ok, loop_fn, Loop, err, result};
+//use futures::future::{ok, loop_fn, Loop, err, result};
 
 //use capnp::serialize::OwnedSegments;
 use capnp_futures::serialize::OwnedSegments;
-use capnp::message::{DEFAULT_READER_OPTIONS, Reader, ReaderOptions};
+//use capnp::message::{DEFAULT_READER_OPTIONS, Reader, ReaderOptions};
 use futures::sync::mpsc::{self, UnboundedSender, UnboundedReceiver};
-use capnp_futures::serialize::{read_message, write_message, Transport};
+//use capnp_futures::serialize::{read_message, write_message, Transport};
 use smartconn::TimedTransport;
-use state::ConsensusState;
+//use state::ConsensusState;
 
 fn main() {
     let peers: Vec<net::SocketAddr> = vec!["127.0.0.1:5000", "127.0.0.1:5001"]

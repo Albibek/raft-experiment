@@ -7,6 +7,7 @@ use state::ConsensusState;
 
 //================= Peer messages
 
+#[derive(Debug)]
 pub enum PeerMessage {
     AppendEntriesRequest(AppendEntriesRequest),
     AppendEntriesResponse(AppendEntriesResponse),
@@ -14,7 +15,7 @@ pub enum PeerMessage {
     RequestVoteResponse(RequestVoteResponse),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct AppendEntriesRequest {
     /// The leader's term.
     pub term: Term,
@@ -33,6 +34,7 @@ pub struct AppendEntriesRequest {
     // TODO: custom Clone or Cow to avoid cloning vector
 }
 
+#[derive(Debug)]
 pub enum AppendEntriesResponse {
     Success(Term, LogIndex),
     StaleTerm(Term),
@@ -41,7 +43,7 @@ pub enum AppendEntriesResponse {
     InternalError(String), // TODO who returns this?
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RequestVoteRequest {
     /// The candidate's term.
     pub term: Term,
@@ -53,6 +55,7 @@ pub struct RequestVoteRequest {
     pub last_log_term: Term,
 }
 
+#[derive(Debug)]
 pub enum RequestVoteResponse {
     StaleTerm(Term),
     InconsistentLog(Term),
@@ -72,6 +75,7 @@ impl RequestVoteResponse {
 }
 
 //================= Client messages
+#[derive(Debug)]
 pub enum ClientRequest {
     Ping,
     Proposal(Vec<u8>),
@@ -79,12 +83,14 @@ pub enum ClientRequest {
 }
 
 
+#[derive(Debug)]
 pub enum ClientResponse {
     Ping(PingResponse),
     Proposal(CommandResponse),
     Query(CommandResponse),
 }
 
+#[derive(Debug)]
 pub struct PingResponse {
     /// The server's current term
     pub(crate) term: Term,
@@ -96,6 +102,7 @@ pub struct PingResponse {
     pub(crate) state: ConsensusState,
 }
 
+#[derive(Debug)]
 pub enum CommandResponse {
     Success(Vec<u8>),
 

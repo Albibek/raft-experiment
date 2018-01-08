@@ -1,4 +1,4 @@
-use std::{ops, fmt, net, sync};
+use std::{ops, fmt};
 use error::*;
 use std::sync::Arc;
 
