@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use capnp::message::{Builder, HeapAllocator};
 
-use {ClientId, Term, LogIndex, ServerId};
-use messages_capnp::{client_request, client_response, connection_preamble, preamble_response,
-                     message, ConnectionResponse};
+use {ClientId, LogIndex, ServerId, Term};
+use messages_capnp::{client_request, client_response, connection_preamble, message,
+                     preamble_response, ConnectionResponse};
 
 // ConnectionPreamble
 

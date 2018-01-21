@@ -21,16 +21,15 @@ use std::sync::{Arc, RwLock};
 use capnp::message::{Builder, HeapAllocator, Reader, ReaderSegments};
 use rand::{self, Rng};
 
-use {LogIndex, Term, ServerId, ClientId, messages};
-use messages_capnp::{append_entries_request, append_entries_response, client_request,
-                     proposal_request, query_request, message, request_vote_request,
-                     request_vote_response};
-use state::{ConsensusState, LeaderState, CandidateState, FollowerState};
+use {messages, ClientId, LogIndex, ServerId, Term};
+use messages_capnp::{append_entries_request, append_entries_response, client_request, message,
+                     proposal_request, query_request, request_vote_request, request_vote_response};
+use state::{CandidateState, ConsensusState, FollowerState, LeaderState};
 use state_machine::StateMachine;
 use persistent_log::Log;
 
-use futures::{Future, Stream, Sink, IntoFuture};
-use futures::sync::mpsc::{UnboundedSender, UnboundedReceiver};
+use futures::{Future, IntoFuture, Sink, Stream};
+use futures::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio_service::Service;
 
 use error::*;
@@ -92,7 +91,7 @@ impl fmt::Debug for Actions {
         write!(
             fmt,
             "Actions {{ peer_messages: {:?}, client_messages: {:?}, clear_timeouts: {:?}, \
-                timeouts: {:?}, clear_peer_messages: {} }}",
+             timeouts: {:?}, clear_peer_messages: {} }}",
             peer_messages,
             client_messages,
             self.clear_timeouts,
@@ -243,8 +242,8 @@ where
     ) {
         //push_log_scope!("{:?}", self);
         self.peers.insert(peer, addr); //.expect(
-        //"new peer insertion not supported",
-        //);
+                                       //"new peer insertion not supported",
+                                       //);
         match self.state {
             ConsensusState::Leader => {
                 // Send any outstanding entries to the peer, or an empty heartbeat if there are no
@@ -308,95 +307,95 @@ where
 
         match self.state {
             ConsensusState::Follower => {
-                let message =
-                    {
-                        if current_term < leader_term {
-                            self.log.set_current_term(leader_term).unwrap();
-                            self.follower_state.set_leader(from);
-                        }
+                let message = {
+                    if current_term < leader_term {
+                        self.log.set_current_term(leader_term).unwrap();
+                        self.follower_state.set_leader(from);
+                    }
 
-                        let leader_prev_log_index = LogIndex(request.get_prev_log_index());
-                        let leader_prev_log_term = Term(request.get_prev_log_term());
+                    let leader_prev_log_index = LogIndex(request.get_prev_log_index());
+                    let leader_prev_log_term = Term(request.get_prev_log_term());
 
-                        let latest_log_index = self.latest_log_index();
-                        if latest_log_index < leader_prev_log_index {
-                            // If the previous entries index was not the same we'd leave a gap! Reply failure.
+                    let latest_log_index = self.latest_log_index();
+                    if latest_log_index < leader_prev_log_index {
+                        // If the previous entries index was not the same we'd leave a gap! Reply failure.
+                        scoped_debug!(
+                            "AppendEntriesRequest: inconsistent previous log index: \
+                             leader: {}, local: {}",
+                            leader_prev_log_index,
+                            latest_log_index
+                        );
+                        Ok(ConsensusResponse::InconsistentPrevEntry(
+                            self.current_term(),
+                            leader_prev_log_index,
+                        ))
+                    } else {
+                        let existing_term = if leader_prev_log_index == LogIndex::from(0) {
+                            Term::from(0)
+                        } else {
+                            self.log.entry(leader_prev_log_index).unwrap().0
+                        };
+
+                        if existing_term != leader_prev_log_term {
                             scoped_debug!(
-                                "AppendEntriesRequest: inconsistent previous log index: \
-                                      leader: {}, local: {}",
-                                leader_prev_log_index,
-                                latest_log_index
+                                "AppendEntriesRequest: inconsistent previous log term: \
+                                 leader term: {}, local term: {}",
+                                leader_prev_log_term,
+                                existing_term
                             );
+                            // If an existing entry conflicts with a new one (same index but different terms),
+                            // delete the existing entry and all that follow it
                             Ok(ConsensusResponse::InconsistentPrevEntry(
                                 self.current_term(),
                                 leader_prev_log_index,
                             ))
-
                         } else {
-                            let existing_term = if leader_prev_log_index == LogIndex::from(0) {
-                                Term::from(0)
-                            } else {
-                                self.log.entry(leader_prev_log_index).unwrap().0
-                            };
-
-                            if existing_term != leader_prev_log_term {
-                                scoped_debug!(
-                                    "AppendEntriesRequest: inconsistent previous log term: \
-                                          leader term: {}, local term: {}",
-                                    leader_prev_log_term,
-                                    existing_term
-                                );
-                                // If an existing entry conflicts with a new one (same index but different terms),
-                                // delete the existing entry and all that follow it
-                                Ok(ConsensusResponse::InconsistentPrevEntry(
-                                    self.current_term(),
-                                    leader_prev_log_index,
-                                ))
-                            } else {
-                                if let Ok(entries) = request.get_entries() {
-                                    let num_entries: u32 = entries.len();
-                                    let new_latest_log_index = leader_prev_log_index +
-                                        num_entries as u64;
-                                    if new_latest_log_index < self.follower_state.min_index {
-                                        // Stale entry; ignore. This guards against overwriting a
-                                        // possibly committed part of the log if messages get
-                                        // rearranged; see ktoso/akka-raft#66.
-                                        return Ok(ConsensusResponse::StaleEntry);
-                                    }
-                                    scoped_debug!(
-                                        "AppendEntriesRequest: {} entries from leader: {}",
-                                        num_entries,
-                                        from
-                                    );
-
-                                    let entries_vec: Vec<(Term, &[u8])> =
-                                    entries.iter()
-                                           .map(|entry| {
-                                               (Term::from(entry.get_term()),
-                                                entry.get_data().unwrap_or(b""))
-                                           })
-                                           .collect();
-
-                                    self.log
-                                        .append_entries(leader_prev_log_index + 1, &entries_vec)
-                                        .unwrap();
-                                    self.follower_state.min_index = new_latest_log_index;
-                                    // We are matching the leader's log up to and including `new_latest_log_index`.
-                                    self.commit_index = cmp::min(
-                                        LogIndex::from(request.get_leader_commit()),
-                                        new_latest_log_index,
-                                    );
-                                    self.apply_commits();
-                                } else {
-                                    panic!("AppendEntriesRequest: no entry list")
+                            if let Ok(entries) = request.get_entries() {
+                                let num_entries: u32 = entries.len();
+                                let new_latest_log_index =
+                                    leader_prev_log_index + num_entries as u64;
+                                if new_latest_log_index < self.follower_state.min_index {
+                                    // Stale entry; ignore. This guards against overwriting a
+                                    // possibly committed part of the log if messages get
+                                    // rearranged; see ktoso/akka-raft#66.
+                                    return Ok(ConsensusResponse::StaleEntry);
                                 }
-                                Ok(ConsensusResponse::AppendEntriesSuccess(
-                                    self.current_term(),
-                                    self.log.latest_log_index().unwrap(),
-                                ))
+                                scoped_debug!(
+                                    "AppendEntriesRequest: {} entries from leader: {}",
+                                    num_entries,
+                                    from
+                                );
+
+                                let entries_vec: Vec<(Term, &[u8])> = entries
+                                    .iter()
+                                    .map(|entry| {
+                                        (
+                                            Term::from(entry.get_term()),
+                                            entry.get_data().unwrap_or(b""),
+                                        )
+                                    })
+                                    .collect();
+
+                                self.log
+                                    .append_entries(leader_prev_log_index + 1, &entries_vec)
+                                    .unwrap();
+                                self.follower_state.min_index = new_latest_log_index;
+                                // We are matching the leader's log up to and including `new_latest_log_index`.
+                                self.commit_index = cmp::min(
+                                    LogIndex::from(request.get_leader_commit()),
+                                    new_latest_log_index,
+                                );
+                                self.apply_commits();
+                            } else {
+                                panic!("AppendEntriesRequest: no entry list")
                             }
+                            Ok(ConsensusResponse::AppendEntriesSuccess(
+                                self.current_term(),
+                                self.log.latest_log_index().unwrap(),
+                            ))
                         }
-                    };
+                    }
+                };
                 message
                 //FIXME: start/reset the election timeout
                 //actions.timeouts.push(ConsensusTimeout::Election);
@@ -405,7 +404,7 @@ where
                 // recognize the new leader, return to follower state, and apply the entries
                 scoped_info!(
                     "received AppendEntriesRequest from Consensus {{ id: {}, term: {} \
-                              }} with newer term; transitioning to Follower",
+                     }} with newer term; transitioning to Follower",
                     from,
                     leader_term
                 );
@@ -428,7 +427,7 @@ where
                 // recognize the new leader, return to follower state, and apply the entries
                 scoped_info!(
                     "received AppendEntriesRequest from Consensus {{ id: {}, term: {} \
-                              }} with newer term; transitioning to Follower",
+                     }} with newer term; transitioning to Follower",
                     from,
                     leader_term
                 );
@@ -461,7 +460,7 @@ where
             // use it as the leader hint.
             scoped_info!(
                 "AppendEntriesResponse from peer {} with newer term: {}; \
-                         transitioning to Follower",
+                 transitioning to Follower",
                 from,
                 responder_term
             );
@@ -484,24 +483,20 @@ where
                 scoped_assert!(self.is_leader());
                 let follower_latest_log_index = LogIndex::from(follower_latest_log_index);
                 scoped_assert!(follower_latest_log_index <= local_latest_log_index);
-                self.leader_state.set_match_index(
-                    from,
-                    follower_latest_log_index,
-                );
+                self.leader_state
+                    .set_match_index(from, follower_latest_log_index);
                 self.advance_commit_index(actions);
             }
             Ok(append_entries_response::Which::InconsistentPrevEntry(next_index)) => {
                 scoped_assert!(self.is_leader());
                 scoped_debug!(
                     "AppendEntriesResponse from peer {}: \
-                              inconsistent previous entry index: {}",
+                     inconsistent previous entry index: {}",
                     from,
                     next_index
                 );
-                self.leader_state.set_next_index(
-                    from,
-                    LogIndex::from(next_index),
-                );
+                self.leader_state
+                    .set_next_index(from, LogIndex::from(next_index));
             }
             Ok(append_entries_response::Which::StaleTerm(..)) => {
                 // The peer is reporting a stale term, but the term number matches the local term.
@@ -524,7 +519,7 @@ where
             Err(error) => {
                 scoped_warn!(
                     "AppendEntriesResponse from peer {}: unable to deserialize \
-                              response: {}",
+                     response: {}",
                     from,
                     error
                 );
@@ -536,7 +531,7 @@ where
             // If the peer is behind, send it entries to catch up.
             scoped_debug!(
                 "AppendEntriesResponse: peer {} is missing at least {} entries; \
-                          sending missing entries",
+                 sending missing entries",
                 from,
                 (local_latest_log_index + 1 - next_index.0).0
             );
@@ -562,10 +557,8 @@ where
                 self.commit_index,
             );
 
-            self.leader_state.set_next_index(
-                from,
-                local_latest_log_index + 1,
-            );
+            self.leader_state
+                .set_next_index(from, local_latest_log_index + 1);
             actions.peer_messages.push((from, message));
         } else {
             // If the peer is caught up, set a heartbeat timeout.
@@ -591,7 +584,7 @@ where
         let candidate_log_index = LogIndex(request.get_last_log_index());
         scoped_debug!(
             "RequestVoteRequest from Consensus {{ id: {}, term: {}, latest_log_term: \
-                       {}, latest_log_index: {} }}",
+             {}, latest_log_index: {} }}",
             &candidate,
             candidate_term,
             candidate_log_term,
@@ -602,7 +595,7 @@ where
         let new_local_term = if candidate_term > local_term {
             scoped_info!(
                 "received RequestVoteRequest from Consensus {{ id: {}, term: {} }} \
-                         with newer term; transitioning to Follower",
+                 with newer term; transitioning to Follower",
                 candidate,
                 candidate_term
             );
@@ -614,12 +607,13 @@ where
 
         let message = if candidate_term < local_term {
             Ok(RequestVoteResponse::StaleTerm(new_local_term))
-        } else if candidate_log_term < self.latest_log_term() ||
-                   candidate_log_index < self.latest_log_index()
+        } else if candidate_log_term < self.latest_log_term()
+            || candidate_log_index < self.latest_log_index()
         {
             Ok(RequestVoteResponse::InconsistentLog(new_local_term))
         } else {
-            match self.log.voted_for().unwrap() { // TODO deal with unwrap
+            match self.log.voted_for().unwrap() {
+                // TODO deal with unwrap
                 None => {
                     self.log.set_voted_for(candidate).unwrap(); // TODO deal with unwrap
                     Ok(RequestVoteResponse::Granted(new_local_term))
@@ -657,7 +651,7 @@ where
             // use it as the leader hint.
             scoped_info!(
                 "received RequestVoteResponse from Consensus {{ id: {}, term: {} }} \
-                         with newer term; transitioning to Follower",
+                 with newer term; transitioning to Follower",
                 from,
                 voter_term
             );
@@ -687,10 +681,9 @@ where
         actions: &mut Actions,
     ) {
         if self.is_candidate() || (self.is_follower() && self.follower_state.leader.is_none()) {
-            actions.client_messages.push((
-                from,
-                messages::command_response_unknown_leader(),
-            ));
+            actions
+                .client_messages
+                .push((from, messages::command_response_unknown_leader()));
         } else if self.is_follower() {
             let message = messages::command_response_not_leader(
                 &self.peers[&self.follower_state.leader.unwrap()],
@@ -743,10 +736,9 @@ where
         scoped_trace!("query from Client({})", from);
 
         if self.is_candidate() || (self.is_follower() && self.follower_state.leader.is_none()) {
-            actions.client_messages.push((
-                from,
-                messages::command_response_unknown_leader(),
-            ));
+            actions
+                .client_messages
+                .push((from, messages::command_response_unknown_leader()));
         } else if self.is_follower() {
             let message = messages::command_response_not_leader(
                 &self.peers[&self.follower_state.leader.unwrap()],
@@ -941,10 +933,9 @@ where
     /// Get the cluster quorum majority size.
     fn majority(&self) -> usize {
         let peers = self.peers.len();
-        let cluster_members = peers.checked_add(1).expect(&format!(
-            "unable to support {} cluster members",
-            peers
-        ));
+        let cluster_members = peers
+            .checked_add(1)
+            .expect(&format!("unable to support {} cluster members", peers));
         (cluster_members >> 1) + 1
     }
 }
@@ -956,30 +947,24 @@ where
 {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         match self.state {
-            ConsensusState::Follower => {
-                write!(
-                    fmt,
-                    "Follower {{ term: {}, index: {} }}",
-                    self.current_term(),
-                    self.latest_log_index()
-                )
-            }
-            ConsensusState::Candidate => {
-                write!(
-                    fmt,
-                    "Candidate {{ term: {}, index: {} }}",
-                    self.current_term(),
-                    self.latest_log_index()
-                )
-            }
-            ConsensusState::Leader => {
-                write!(
-                    fmt,
-                    "Leader {{ term: {}, index: {} }}",
-                    self.current_term(),
-                    self.latest_log_index()
-                )
-            }
+            ConsensusState::Follower => write!(
+                fmt,
+                "Follower {{ term: {}, index: {} }}",
+                self.current_term(),
+                self.latest_log_index()
+            ),
+            ConsensusState::Candidate => write!(
+                fmt,
+                "Candidate {{ term: {}, index: {} }}",
+                self.current_term(),
+                self.latest_log_index()
+            ),
+            ConsensusState::Leader => write!(
+                fmt,
+                "Leader {{ term: {}, index: {} }}",
+                self.current_term(),
+                self.latest_log_index()
+            ),
         }
     }
 }

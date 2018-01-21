@@ -63,10 +63,10 @@ pub struct FsLog {
 
 impl FsLog {
     pub fn new(filename: &path::Path) -> Result<FsLog> {
-
-        let mut w = BufWriter::new(fs::OpenOptions::new().create(true).write(true).open(
-            &filename,
-        )?);
+        let mut w = BufWriter::new(fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&filename)?);
 
         let filelen = w.get_ref().metadata()?.len();
 
@@ -110,7 +110,8 @@ impl FsLog {
 
     fn write_term(&mut self) -> Result<()> {
         self.writer.seek(SeekFrom::Start(8))?;
-        self.writer.write_u64::<BigEndian>(self.current_term.into())?;
+        self.writer
+            .write_u64::<BigEndian>(self.current_term.into())?;
         // Set voted_for to None
         self.writer.write_u64::<BigEndian>(<u64>::max_value())?;
         self.writer.flush()?;
@@ -171,9 +172,11 @@ impl FsLog {
         self.truncate_file(index)?;
         self.entries.truncate(index);
         self.offsets.truncate(index);
-        self.entries.extend(entries.iter().map(
-            |&(term, command)| (term, command.to_vec()),
-        ));
+        self.entries.extend(
+            entries
+                .iter()
+                .map(|&(term, command)| (term, command.to_vec())),
+        );
         for &(term, command) in entries {
             self.write_entry(index, term, command)?;
             index += 1;
@@ -263,12 +266,18 @@ impl Clone for FsLog {
     fn clone(&self) -> FsLog {
         // Wish I didn't have to unwrap the filehandles...
         FsLog {
-            reader: BufReader::new(self.reader.get_ref().try_clone().expect(
-                "cloning self.reader",
-            )),
-            writer: BufWriter::new(self.writer.get_ref().try_clone().expect(
-                "cloning self.writer",
-            )),
+            reader: BufReader::new(
+                self.reader
+                    .get_ref()
+                    .try_clone()
+                    .expect("cloning self.reader"),
+            ),
+            writer: BufWriter::new(
+                self.writer
+                    .get_ref()
+                    .try_clone()
+                    .expect("cloning self.writer"),
+            ),
             current_term: self.current_term,
             voted_for: self.voted_for,
             entries: self.entries.clone(),

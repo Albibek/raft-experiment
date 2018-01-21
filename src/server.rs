@@ -1,32 +1,32 @@
 use error::*;
 use common::*;
-use state::{ConsensusState, LeaderState, CandidateState, FollowerState};
+use state::{CandidateState, ConsensusState, FollowerState, LeaderState};
 use state_machine::StateMachine;
 use persistent_log::Log;
 
 use messages_capnp::{connection_preamble, preamble_response, ConnectionResponse};
 use messages::{preamble_response, server_connection_preamble};
 
-use std::{ops, fmt, net, sync};
+use std::{fmt, net, ops, sync};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use std::net::SocketAddr;
 
 use uuid::Uuid;
-use tokio_core::reactor::{Core, Timeout, Handle};
+use tokio_core::reactor::{Core, Handle, Timeout};
 use tokio_core::net::TcpListener;
 
 use tokio_core::net::TcpStream;
 use tokio_service::Service;
 use tokio_timer::Timer;
-use futures::{Future, Stream, Sink, IntoFuture};
-use futures::future::{ok, loop_fn, Loop, err, result};
+use futures::{Future, IntoFuture, Sink, Stream};
+use futures::future::{err, loop_fn, ok, result, Loop};
 
 //use capnp::serialize::OwnedSegments;
 use capnp_futures::serialize::OwnedSegments;
-use capnp::message::{DEFAULT_READER_OPTIONS, Reader, ReaderOptions};
-use futures::sync::mpsc::{self, UnboundedSender, UnboundedReceiver, unbounded};
+use capnp::message::{Reader, ReaderOptions, DEFAULT_READER_OPTIONS};
+use futures::sync::mpsc::{self, unbounded, UnboundedReceiver, UnboundedSender};
 use capnp_futures::serialize::{read_message, write_message, Transport};
 use smartconn::TimedTransport;
 
@@ -281,15 +281,13 @@ where
                                 let message = message.unwrap();
 
                                 match message.get_root::<preamble_response::Reader>() {
-                                    Ok(m) => {
-                                        if m.get_response().unwrap() != ConnectionResponse::Ok {
-                                            err(())
-                                        } else {
-
-                                            println!("OK");
-                                            ok(transport)
-                                        }
-                                    }
+                                    Ok(m) => if m.get_response().unwrap() != ConnectionResponse::Ok
+                                    {
+                                        err(())
+                                    } else {
+                                        println!("OK");
+                                        ok(transport)
+                                    },
                                     Err(_) => err(()),
                                 }
                             })
@@ -309,12 +307,12 @@ where
                         println!("connection error");
                         timer1.sleep(Duration::from_millis(1000)).then(|_| Err(()))
                     });
-                timer.timeout(conn, Duration::from_millis(3000)).then(
-                    move |res| match res {
+                timer
+                    .timeout(conn, Duration::from_millis(3000))
+                    .then(move |res| match res {
                         Err(_) => Ok(Loop::Continue((addr.clone(), handle.clone(), timer))),
                         Ok(conn) => Ok::<_, ()>(Loop::Break(conn)),
-                    },
-                )
+                    })
             },
         ).and_then(|res| res);
 

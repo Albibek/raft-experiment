@@ -14,7 +14,7 @@ use std::fmt::Debug;
 use std::result;
 
 pub use persistent_log::fs::FsLog;
-pub use persistent_log::mem::{MemLog, Error};
+pub use persistent_log::mem::{Error, MemLog};
 
 use LogIndex;
 use Term;

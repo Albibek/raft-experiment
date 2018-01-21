@@ -20,7 +20,7 @@ pub struct MemLog {
 }
 
 /// Non-instantiable error type for MemLog
-pub enum Error { }
+pub enum Error {}
 
 impl fmt::Display for Error {
     fn fmt(&self, _fmt: &mut fmt::Formatter) -> fmt::Result {
@@ -101,9 +101,13 @@ impl Log for MemLog {
     ) -> result::Result<(), Error> {
         assert!(self.latest_log_index().unwrap() + 1 >= from);
         self.entries.truncate((from - 1).as_u64() as usize);
-        Ok(self.entries.extend(entries.iter().map(|&(term, command)| {
-            (term, command.to_vec())
-        })))
+        Ok(
+            self.entries.extend(
+                entries
+                    .iter()
+                    .map(|&(term, command)| (term, command.to_vec())),
+            ),
+        )
     }
 }
 

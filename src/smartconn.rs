@@ -5,7 +5,7 @@ use tokio_core::net::{TcpStream, TcpStreamNew};
 use error::*;
 
 use std::sync::Arc;
-use futures::{Stream, Poll, Sink, StartSend, Async};
+use futures::{Async, Poll, Sink, StartSend, Stream};
 use std::time::Duration;
 use tokio_core::reactor::{Handle, Interval};
 
@@ -13,7 +13,7 @@ use {RaftEgress, RaftIngress};
 use capnp_futures::serialize::{read_message, write_message, Transport};
 use futures::future::Either;
 
-use capnp::message::{DEFAULT_READER_OPTIONS, Reader};
+use capnp::message::{Reader, DEFAULT_READER_OPTIONS};
 
 /// Note: Timeout is not really presise in current scheme for performance reasons.
 /// All the timers fire not RIGHT after duration specified but drop interval is

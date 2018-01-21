@@ -1,21 +1,21 @@
-#[macro_use]
-extern crate wrapped_enum;
+extern crate byteorder;
+extern crate bytes;
 extern crate capnp;
-extern crate uuid;
 extern crate capnp_futures;
 #[macro_use]
 extern crate futures;
-extern crate tokio_core;
-extern crate tokio_service;
-extern crate tokio_io;
-extern crate tokio_timer;
-extern crate rand;
-extern crate byteorder;
-extern crate bytes;
-#[macro_use]
-extern crate scoped_log;
 #[macro_use]
 extern crate log;
+extern crate rand;
+#[macro_use]
+extern crate scoped_log;
+extern crate tokio_core;
+extern crate tokio_io;
+extern crate tokio_service;
+extern crate tokio_timer;
+extern crate uuid;
+#[macro_use]
+extern crate wrapped_enum;
 
 pub mod messages_capnp {
     #![allow(dead_code)]
@@ -29,9 +29,9 @@ pub mod messages;
 pub mod state;
 mod error;
 //mod consensus;
-mod consensus_lib;
-mod consensus_types;
-mod consensus_shared;
+pub mod consensus_lib;
+pub mod consensus_types;
+pub mod consensus_shared;
 mod backoff;
 mod smartconn;
 mod server;
@@ -44,7 +44,7 @@ use consensus_lib::*;
 use consensus_types::*;
 use consensus_shared::*;
 
-use std::{ops, fmt, net, sync};
+use std::{fmt, net, ops, sync};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
@@ -55,13 +55,13 @@ use tokio_core::net::TcpListener;
 use tokio_core::net::TcpStream;
 use tokio_service::Service;
 use tokio_timer::Timer;
-use futures::{Future, Stream, Sink, IntoFuture};
+use futures::{Future, IntoFuture, Sink, Stream};
 //use futures::future::{ok, loop_fn, Loop, err, result};
 
 //use capnp::serialize::OwnedSegments;
 use capnp_futures::serialize::OwnedSegments;
 //use capnp::message::{DEFAULT_READER_OPTIONS, Reader, ReaderOptions};
-use futures::sync::mpsc::{self, UnboundedSender, UnboundedReceiver};
+use futures::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 //use capnp_futures::serialize::{read_message, write_message, Transport};
 use smartconn::TimedTransport;
 //use state::ConsensusState;
@@ -104,9 +104,10 @@ fn main() {
 
         let timer = Timer::default();
 
-        for (srvid, addr) in cons_peers.clone().into_iter().filter(|&(_, addr)| {
-            addr.port() == 5000
-        })
+        for (srvid, addr) in cons_peers
+            .clone()
+            .into_iter()
+            .filter(|&(_, addr)| addr.port() == 5000)
         {
             //FIXME: deal with correct ID
             let srvid: ServerId = 0.into();
@@ -139,7 +140,6 @@ fn main() {
                     })
                     .then(|_| Ok(())),
             );
-
         }
         core.run(server.into_future()).unwrap();
     });
@@ -147,5 +147,4 @@ fn main() {
     th.push(h);
 
     th.into_iter().map(|h| h.join()).last();
-
 }

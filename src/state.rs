@@ -98,7 +98,9 @@ pub struct CandidateState {
 impl CandidateState {
     /// Creates a new `CandidateState`.
     pub fn new() -> CandidateState {
-        CandidateState { granted_votes: HashSet::new() }
+        CandidateState {
+            granted_votes: HashSet::new(),
+        }
     }
 
     /// Records a vote from `voter`.

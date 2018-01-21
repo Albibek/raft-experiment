@@ -1,5 +1,5 @@
 use std;
-use std::{io, net, fmt};
+use std::{fmt, io, net};
 use capnp;
 /// A simple convienence type.
 pub type Result<T> = std::result::Result<T, Error>;

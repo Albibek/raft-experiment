@@ -24,13 +24,12 @@ use consensus_types::*;
 
 use {RaftEgress, RaftIngress};
 
-/// A handler that just collects all messages leaving someone external to process them
+/// A handler that collects all messages leaving processing of them to external actor
 #[derive(Debug)]
 pub struct CollectHandler {
     pub peer_messages: HashMap<ServerId, Vec<PeerMessage>>,
     pub client_messages: HashMap<ClientId, Vec<ClientResponse>>,
     pub timeouts: Vec<ConsensusTimeout>,
-    pub clear_timeouts: bool,
 }
 
 impl CollectHandler {
@@ -39,7 +38,6 @@ impl CollectHandler {
             peer_messages: HashMap::new(),
             client_messages: HashMap::new(),
             timeouts: Vec::new(),
-            clear_timeouts: false,
         }
     }
 
@@ -47,7 +45,6 @@ impl CollectHandler {
         self.peer_messages.clear();
         self.client_messages.clear();
         self.timeouts.clear();
-        self.clear_timeouts = false;
     }
 }
 
@@ -63,14 +60,15 @@ impl ConsensusHandler for CollectHandler {
     }
 
     fn set_timeout(&mut self, timeout: ConsensusTimeout) {
-        self.timeouts.push(timeout);
+        if !self.timeouts.iter().any(|&t| t == timeout) {
+            self.timeouts.push(timeout);
+        }
     }
 
-    fn clear_timeout(&mut self, _timeout: ConsensusTimeout) {
-        // TODO: there is probably a bit of a logic flaw here(we clear all timeouts when we should
-        // clear only one)
-        // but it's ok since original consensus worked this way
-        self.clear_timeouts = true
+    fn clear_timeout(&mut self, timeout: ConsensusTimeout) {
+        if let Some(pos) = self.timeouts.iter().position(|&t| t == timeout) {
+            self.timeouts.remove(pos);
+        }
     }
 }
 
@@ -153,7 +151,7 @@ where
 {
     pub fn new(id: ServerId, peers: Vec<ServerId>, log: L, state_machine: M) -> Self {
         let handler = CollectHandler::new();
-        let consensus = Consensus::new(id, peers, log, state_machine, handler);
+        let mut consensus = Consensus::new(id, peers, log, state_machine, handler);
         consensus.init();
 
         Self {

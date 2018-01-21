@@ -1,13 +1,12 @@
-use {LogIndex, Term, ServerId, ClientId};
+use {LogIndex, ServerId, Term};
 
-use std::collections::HashMap;
 use persistent_log::fs::Entry;
 use rand::{self, Rng};
 use state::ConsensusState;
 
 //================= Peer messages
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PeerMessage {
     AppendEntriesRequest(AppendEntriesRequest),
     AppendEntriesResponse(AppendEntriesResponse),
@@ -34,13 +33,12 @@ pub struct AppendEntriesRequest {
     // TODO: custom Clone or Cow to avoid cloning vector
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AppendEntriesResponse {
     Success(Term, LogIndex),
     StaleTerm(Term),
     InconsistentPrevEntry(Term, LogIndex),
     StaleEntry,
-    InternalError(String), // TODO who returns this?
 }
 
 #[derive(Clone, Debug)]
@@ -55,7 +53,7 @@ pub struct RequestVoteRequest {
     pub last_log_term: Term,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RequestVoteResponse {
     StaleTerm(Term),
     InconsistentLog(Term),
@@ -66,31 +64,30 @@ pub enum RequestVoteResponse {
 impl RequestVoteResponse {
     pub fn voter_term(&self) -> Term {
         match self {
-            &RequestVoteResponse::StaleTerm(t) |
-            &RequestVoteResponse::InconsistentLog(t) |
-            &RequestVoteResponse::Granted(t) |
-            &RequestVoteResponse::AlreadyVoted(t) => t,
+            &RequestVoteResponse::StaleTerm(t)
+            | &RequestVoteResponse::InconsistentLog(t)
+            | &RequestVoteResponse::Granted(t)
+            | &RequestVoteResponse::AlreadyVoted(t) => t,
         }
     }
 }
 
 //================= Client messages
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ClientRequest {
     Ping,
     Proposal(Vec<u8>),
     Query(Vec<u8>),
 }
 
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ClientResponse {
     Ping(PingResponse),
     Proposal(CommandResponse),
     Query(CommandResponse),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PingResponse {
     /// The server's current term
     pub(crate) term: Term,
@@ -102,9 +99,13 @@ pub struct PingResponse {
     pub(crate) state: ConsensusState,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum CommandResponse {
     Success(Vec<u8>),
+
+    // The proposal has been queued on the leader and waiting the majority
+    // of nodes to commit it
+    Queued,
 
     // The proposal failed because the Raft node is not the leader, and does
     // not know who the leader is.
@@ -113,6 +114,29 @@ pub enum CommandResponse {
     // The client request failed because the Raft node is not the leader.
     // The value returned may be the address of the current leader.
     NotLeader(ServerId),
+}
+
+/// Errors that can happen during consensus
+#[derive(Debug, Clone)]
+pub enum InternalError {
+    /// Consensus state was not `Leader` while it had to be.
+    MustLeader,
+
+    /// Consensus state was `Leader` while it had NOT to be.
+    MustNotLeader,
+
+    /// Consensus state was not `Candidate` while it had to be.
+    MustCandidate,
+
+    /// Follower responded with inconsistent index.
+    BadFollowerIndex,
+
+    /// BUG: peer leader with matching term detected
+    AnotherLeader(ServerId, Term),
+
+    /// Error happened in PersistentLog
+    // TODO: Proper error conversions
+    PersistentLog(String),
 }
 
 //================= other messages
